@@ -3,11 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\Category;
+use App\Services\CategoryService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 class CategoryController extends Controller
 {
+    public function __construct(
+        private CategoryService $categoryService
+    ) {}
+
     public function index(Request $request)
     {
         $type = $request->get('type');
@@ -21,7 +26,7 @@ class CategoryController extends Controller
             ->get();
 
         if ($request->get('tree')) {
-            $categories = $this->buildTree($categories);
+            $categories = $this->categoryService->getTree($request->user(), $type);
         }
 
         return response()->json(['success' => true, 'data' => $categories]);
@@ -38,7 +43,7 @@ class CategoryController extends Controller
             'is_active' => ['nullable', 'boolean'],
         ]);
 
-        $category = $request->user()->categories()->create($validated);
+        $category = $this->categoryService->create($request->user(), $validated);
 
         return response()->json(['success' => true, 'data' => $category], 201);
     }
@@ -68,9 +73,12 @@ class CategoryController extends Controller
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
-        $category->update($validated);
-
-        return response()->json(['success' => true, 'data' => $category]);
+        try {
+            $category = $this->categoryService->update($category, $validated);
+            return response()->json(['success' => true, 'data' => $category]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
     }
 
     public function destroy(Request $request, Category $category)
@@ -79,13 +87,12 @@ class CategoryController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        if ($category->transactions()->count() > 0) {
-            $category->delete();
+        try {
+            $this->categoryService->delete($category);
             return response()->json(['success' => true, 'message' => 'Category deleted']);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
         }
-
-        $category->forceDelete();
-        return response()->json(['success' => true, 'message' => 'Category deleted']);
     }
 
     public function reorder(Request $request)
@@ -94,33 +101,8 @@ class CategoryController extends Controller
             'categories' => ['required', 'array'],
         ]);
 
-        foreach ($request->categories as $cat) {
-            Category::where('id', $cat['id'])
-                ->where('user_id', $request->user()->id)
-                ->update(['position' => $cat['position'] ?? 0]);
-        }
+        $this->categoryService->reorder($request->user(), $request->categories);
 
         return response()->json(['success' => true, 'message' => 'Categories reordered']);
-    }
-
-    private function buildTree($categories)
-    {
-        $tree = [];
-        $indexed = [];
-
-        foreach ($categories as $cat) {
-            $indexed[$cat->id] = $cat;
-            $indexed[$cat->id]['children'] = [];
-        }
-
-        foreach ($indexed as $id => $cat) {
-            if ($cat->parent_id && isset($indexed[$cat->parent_id])) {
-                $indexed[$cat->parent_id]['children'][] = $cat;
-            } else {
-                $tree[] = $cat;
-            }
-        }
-
-        return $tree;
     }
 }

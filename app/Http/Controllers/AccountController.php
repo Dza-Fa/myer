@@ -3,26 +3,22 @@
 namespace App\Http\Controllers;
 
 use App\Models\Account;
+use App\Services\AccountService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 class AccountController extends Controller
 {
+    public function __construct(
+        private AccountService $accountService
+    ) {}
+
     /**
      * Display a listing of the user's accounts.
      */
     public function index(Request $request)
     {
-        $accounts = $request->user()
-            ->accounts()
-            ->withCount('transactions')
-            ->orderBy('is_active', 'desc')
-            ->orderBy('name')
-            ->get()
-            ->map(function ($account) {
-                $account->balance = $account->calculateBalance();
-                return $account;
-            });
+        $accounts = $this->accountService->getWithBalances($request->user());
 
         return response()->json([
             'success' => true,
@@ -43,14 +39,7 @@ class AccountController extends Controller
             'is_active' => ['nullable', 'boolean'],
         ]);
 
-        $account = $request->user()->accounts()->create([
-            'uuid' => \Illuminate\Support\Str::uuid()->toString(),
-            'name' => $validated['name'],
-            'type' => $validated['type'],
-            'initial_balance' => $validated['initial_balance'] ?? 0,
-            'currency' => $validated['currency'] ?? 'IDR',
-            'is_active' => $validated['is_active'] ?? true,
-        ]);
+        $account = $this->accountService->create($request->user(), $validated);
 
         return response()->json([
             'success' => true,
@@ -93,7 +82,7 @@ class AccountController extends Controller
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
-        $account->update($validated);
+        $account = $this->accountService->update($account, $validated);
 
         return response()->json([
             'success' => true,
@@ -111,14 +100,9 @@ class AccountController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        if ($account->transactions()->count() > 0) {
-            $account->delete();
-            return response()->json(['success' => true, 'message' => 'Account deleted (soft delete)']);
-        }
+        $this->accountService->delete($account);
 
-        $account->forceDelete();
-
-        return response()->json(['success' => true, 'message' => 'Account deleted permanently']);
+        return response()->json(['success' => true, 'message' => 'Account deleted']);
     }
 
     /**
@@ -145,7 +129,7 @@ class AccountController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        $account->update(['last_reconciled_at' => now()]);
+        $account = $this->accountService->reconcile($account);
 
         return response()->json(['success' => true, 'message' => 'Account reconciled', 'data' => $account]);
     }

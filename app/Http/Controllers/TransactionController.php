@@ -3,14 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\Transaction;
-use App\Models\LedgerEntry;
-use App\Models\Account;
+use App\Services\TransactionService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class TransactionController extends Controller
 {
+    public function __construct(
+        private TransactionService $transactionService
+    ) {}
+
     /**
      * Display a listing of transactions.
      */
@@ -25,28 +27,22 @@ class TransactionController extends Controller
         if ($request->get('type')) {
             $query->where('type', $request->get('type'));
         }
-
         if ($request->get('account_id')) {
             $query->where('account_id', $request->get('account_id'));
         }
-
         if ($request->get('category_id')) {
             $query->where('category_id', $request->get('category_id'));
         }
-
         if ($request->get('status')) {
             $query->where('status', $request->get('status'));
         }
-
         if ($request->get('start_date')) {
             $query->where('transaction_date', '>=', $request->get('start_date'));
         }
-
         if ($request->get('end_date')) {
             $query->where('transaction_date', '<=', $request->get('end_date'));
         }
 
-        // Pagination
         $perPage = $request->get('per_page', 15);
         $transactions = $query->paginate($perPage);
 
@@ -72,121 +68,24 @@ class TransactionController extends Controller
             'tags' => ['nullable', 'array'],
             'tags.*' => ['exists:tags,id'],
             'idempotency_key' => ['nullable', 'string'],
+            'client_request_id' => ['nullable', 'string'],
+            'status' => ['nullable', Rule::in(['draft', 'posted'])],
         ]);
 
-        // Validate account ownership
-        $account = Account::where('id', $validated['account_id'])
-            ->where('user_id', $request->user()->id)
-            ->first();
+        try {
+            $transaction = $this->transactionService->create($request->user(), $validated);
 
-        if (!$account) {
-            return response()->json(['success' => false, 'message' => 'Account not found'], 422);
+            return response()->json([
+                'success' => true,
+                'message' => 'Transaction created successfully',
+                'data' => $transaction,
+            ], 201);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 409);
         }
-
-        // Check idempotency
-        if (!empty($validated['idempotency_key'])) {
-            $existing = Transaction::where('idempotency_key', $validated['idempotency_key'])
-                ->where('user_id', $request->user()->id)
-                ->first();
-
-            if ($existing) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Duplicate transaction',
-                    'existing' => $existing,
-                ], 409);
-            }
-        }
-
-        // For transfer, validate second account
-        if ($validated['type'] === 'transfer' && !empty($validated['transfer_account_id'])) {
-            $transferAccount = Account::where('id', $validated['transfer_account_id'])
-                ->where('user_id', $request->user()->id)
-                ->first();
-
-            if (!$transferAccount) {
-                return response()->json(['success' => false, 'message' => 'Transfer account not found'], 422);
-            }
-        }
-
-        // Create transaction with ledger entries in transaction
-        $transaction = DB::transaction(function () use ($request, $validated, $account) {
-            $transactionGroupId = \Illuminate\Support\Str::uuid()->toString();
-
-            // Create transaction
-            $tx = $request->user()->transactions()->create([
-                'idempotency_key' => $validated['idempotency_key'] ?? null,
-                'client_request_id' => $request->header('X-Request-ID'),
-                'account_id' => $validated['account_id'],
-                'transfer_account_id' => $validated['transfer_account_id'] ?? null,
-                'category_id' => $validated['category_id'] ?? null,
-                'type' => $validated['type'],
-                'amount' => $validated['amount'],
-                'transaction_date' => $validated['transaction_date'],
-                'notes' => $validated['notes'] ?? null,
-                'status' => 'posted',
-                'posting_date' => now(),
-                'transaction_group_id' => $transactionGroupId,
-                'version' => 1,
-            ]);
-
-            // Create ledger entries (double-entry)
-            if ($validated['type'] === 'income') {
-                // Income: debit to account (asset increase)
-                LedgerEntry::create([
-                    'transaction_id' => $tx->id,
-                    'account_id' => $validated['account_id'],
-                    'debit_amount' => $validated['amount'],
-                    'credit_amount' => 0,
-                    'transaction_group_id' => $transactionGroupId,
-                    'sequence_no' => 1,
-                ]);
-            } elseif ($validated['type'] === 'expense') {
-                // Expense: credit from account (asset decrease)
-                LedgerEntry::create([
-                    'transaction_id' => $tx->id,
-                    'account_id' => $validated['account_id'],
-                    'debit_amount' => 0,
-                    'credit_amount' => $validated['amount'],
-                    'transaction_group_id' => $transactionGroupId,
-                    'sequence_no' => 1,
-                ]);
-            } elseif ($validated['type'] === 'transfer') {
-                // Transfer: debit from source, credit to destination
-                LedgerEntry::create([
-                    'transaction_id' => $tx->id,
-                    'account_id' => $validated['account_id'],
-                    'debit_amount' => $validated['amount'],
-                    'credit_amount' => 0,
-                    'transaction_group_id' => $transactionGroupId,
-                    'sequence_no' => 1,
-                ]);
-
-                LedgerEntry::create([
-                    'transaction_id' => $tx->id,
-                    'account_id' => $validated['transfer_account_id'],
-                    'debit_amount' => 0,
-                    'credit_amount' => $validated['amount'],
-                    'transaction_group_id' => $transactionGroupId,
-                    'sequence_no' => 2,
-                ]);
-            }
-
-            // Attach tags
-            if (!empty($validated['tags'])) {
-                $tx->tags()->attach($validated['tags']);
-            }
-
-            return $tx;
-        });
-
-        $transaction->load(['account', 'category', 'tags']);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Transaction created successfully',
-            'data' => $transaction,
-        ], 201);
     }
 
     /**
@@ -198,7 +97,7 @@ class TransactionController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        $transaction->load(['account', 'category', 'transferAccount', 'tags', 'ledgerEntries', 'attachments']);
+        $transaction->load(['account', 'category', 'transferAccount', 'tags', 'ledgerEntries']);
 
         return response()->json([
             'success' => true,
@@ -215,11 +114,6 @@ class TransactionController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        // Only allow updating draft or posted transactions
-        if (in_array($transaction->status, ['locked', 'voided'])) {
-            return response()->json(['success' => false, 'message' => 'Cannot update locked/voided transaction'], 422);
-        }
-
         $validated = $request->validate([
             'amount' => ['sometimes', 'numeric', 'min:1'],
             'account_id' => ['sometimes', 'exists:accounts,id'],
@@ -231,31 +125,20 @@ class TransactionController extends Controller
             'tags' => ['nullable', 'array'],
         ]);
 
-        // Verify account ownership
-        if (isset($validated['account_id'])) {
-            $account = Account::where('id', $validated['account_id'])
-                ->where('user_id', $request->user()->id)
-                ->first();
-            
-            if (!$account) {
-                return response()->json(['success' => false, 'message' => 'Account not found'], 422);
-            }
+        try {
+            $transaction = $this->transactionService->update($transaction, $validated);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Transaction updated successfully',
+                'data' => $transaction,
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
         }
-
-        $transaction->update($validated);
-
-        // Update tags if provided
-        if (isset($validated['tags'])) {
-            $transaction->tags()->sync($validated['tags']);
-        }
-
-        $transaction->load(['account', 'category', 'tags']);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Transaction updated successfully',
-            'data' => $transaction,
-        ]);
     }
 
     /**
@@ -267,19 +150,12 @@ class TransactionController extends Controller
             return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
 
-        if ($transaction->status === 'locked') {
-            return response()->json(['success' => false, 'message' => 'Cannot delete locked transaction'], 422);
+        try {
+            $this->transactionService->delete($transaction);
+            return response()->json(['success' => true, 'message' => 'Transaction deleted']);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
         }
-
-        // Soft delete if has ledger entries
-        if ($transaction->ledgerEntries()->count() > 0) {
-            $transaction->delete();
-            return response()->json(['success' => true, 'message' => 'Transaction deleted (has entries)']);
-        }
-
-        $transaction->forceDelete();
-
-        return response()->json(['success' => true, 'message' => 'Transaction deleted permanently']);
     }
 
     /**
@@ -290,23 +166,11 @@ class TransactionController extends Controller
         $startDate = $request->get('start_date', now()->startOfMonth()->format('Y-m-d'));
         $endDate = $request->get('end_date', now()->endOfMonth()->format('Y-m-d'));
 
-        $transactions = $request->user()->transactions()
-            ->whereBetween('transaction_date', [$startDate, $endDate])
-            ->where('status', 'posted');
-
-        $income = (float) $transactions->clone()->where('type', 'income')->sum('amount');
-        $expense = (float) $transactions->clone()->where('type', 'expense')->sum('amount');
-        $transfer = (float) $transactions->clone()->where('type', 'transfer')->sum('amount');
+        $summary = $this->transactionService->getSummary($request->user(), $startDate, $endDate);
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'period' => ['start' => $startDate, 'end' => $endDate],
-                'total_income' => $income,
-                'total_expense' => $expense,
-                'total_transfer' => $transfer,
-                'net_savings' => $income - $expense,
-            ],
+            'data' => $summary,
         ]);
     }
 
@@ -318,23 +182,7 @@ class TransactionController extends Controller
         $startDate = $request->get('start_date', now()->startOfMonth()->format('Y-m-d'));
         $endDate = $request->get('end_date', now()->endOfMonth()->format('Y-m-d'));
 
-        $byCategory = $request->user()->transactions()
-            ->whereBetween('transaction_date', [$startDate, $endDate])
-            ->where('status', 'posted')
-            ->whereIn('type', ['income', 'expense'])
-            ->with('category:id,name,color')
-            ->get()
-            ->groupBy('category_id')
-            ->map(function ($items, $categoryId) {
-                return [
-                    'category_id' => $categoryId,
-                    'category_name' => $items->first()->category?->name ?? 'Uncategorized',
-                    'category_color' => $items->first()->category?->color ?? '#666666',
-                    'total' => (float) $items->sum('amount'),
-                    'count' => $items->count(),
-                ];
-            })
-            ->values();
+        $byCategory = $this->transactionService->getByCategory($request->user(), $startDate, $endDate);
 
         return response()->json([
             'success' => true,

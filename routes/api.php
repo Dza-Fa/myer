@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\TransactionController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -12,6 +13,11 @@ Route::get('/user', function (Request $request) {
 
 // Protected Routes
 Route::middleware('auth:sanctum')->group(function () {
+    // Dashboard Routes
+    Route::get('dashboard', [DashboardController::class, 'index']);
+    Route::get('dashboard/trend', [DashboardController::class, 'trend']);
+    Route::get('dashboard/accounts-by-type', [DashboardController::class, 'accountsByType']);
+    
     // Account Routes
     Route::apiResource('accounts', AccountController::class);
     Route::get('accounts/{account}/balance-history', [AccountController::class, 'balanceHistory']);

@@ -133,4 +133,75 @@ class DashboardService
             ->values()
             ->toArray();
     }
+
+    /**
+     * Get category chart data for pie chart.
+     */
+    public function getCategoryChartData(User $user, int $year = null, int $month = null): array
+    {
+        $year = $year ?? (int) now()->format('Y');
+        $month = $month ?? (int) now()->format('n');
+        
+        $startDate = sprintf('%04d-%02d-01', $year, $month);
+        $endDate = date('Y-m-t', strtotime($startDate));
+
+        $expenses = $user->transactions()
+            ->whereBetween('transaction_date', [$startDate, $endDate])
+            ->where('type', 'expense')
+            ->where('status', 'posted')
+            ->with('category:id,name,color')
+            ->get()
+            ->groupBy('category_id')
+            ->map(function ($items, $categoryId) {
+                return [
+                    'category_id' => $categoryId,
+                    'category_name' => $items->first()->category?->name ?? 'Uncategorized',
+                    'category_color' => $items->first()->category?->color ?? '#666666',
+                    'total' => (float) $items->sum('amount'),
+                    'percentage' => 0,
+                ];
+            })
+            ->sortByDesc('total')
+            ->values();
+
+        $totalExpense = $expenses->sum('total');
+        
+        return $expenses->map(function ($item) use ($totalExpense) {
+            $item['percentage'] = $totalExpense > 0 
+                ? round(($item['total'] / $totalExpense) * 100, 1) 
+                : 0;
+            return $item;
+        })->toArray();
+    }
+
+    /**
+     * Get cashflow chart data (income vs expense by month).
+     */
+    public function getCashflowChartData(User $user, int $months = 6): array
+    {
+        $data = [];
+        
+        for ($i = $months - 1; $i >= 0; $i--) {
+            $month = now()->subMonths($i);
+            $start = $month->startOfMonth()->format('Y-m-d');
+            $end = $month->endOfMonth()->format('Y-m-d');
+            
+            $transactions = $user->transactions()
+                ->whereBetween('transaction_date', [$start, $end])
+                ->where('status', 'posted');
+            
+            $income = (float) $transactions->clone()->where('type', 'income')->sum('amount');
+            $expense = (float) $transactions->clone()->where('type', 'expense')->sum('amount');
+            
+            $data[] = [
+                'month' => $month->format('M'),
+                'month_full' => $month->format('F Y'),
+                'income' => $income,
+                'expense' => $expense,
+                'savings' => $income - $expense,
+            ];
+        }
+        
+        return $data;
+    }
 }

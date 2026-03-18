@@ -16,12 +16,17 @@ class WebDashboardController extends Controller
         $user = Auth::user();
         $data = $this->dashboardService->getDashboardData($user);
         
+        $cashflowChart = $this->dashboardService->getCashflowChartData($user, 6);
+        $categoryChart = $this->dashboardService->getCategoryChartData($user);
+        
         return view('dashboard', [
             'overview' => $data['overview'],
             'accounts' => $data['accounts'],
             'recentTransactions' => $data['recent_transactions'],
             'topExpenses' => $data['top_expenses'],
             'period' => $data['period'],
+            'cashflowChart' => $cashflowChart,
+            'categoryChart' => $categoryChart,
         ]);
     }
 }
